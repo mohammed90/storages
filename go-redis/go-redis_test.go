@@ -17,15 +17,16 @@ const (
 	byteKey        = "MyByteKey"
 	nonExistentKey = "NonExistentKey"
 	baseValue      = "My first data"
+	redisAddr      = "localhost:6379"
 )
 
 func getRedisInstance() (core.Storer, error) {
-	return redis.Factory(core.CacheProvider{URL: "localhost:6379"}, zap.NewNop().Sugar(), 0)
+	return redis.Factory(core.CacheProvider{URL: redisAddr}, zap.NewNop().Sugar(), 0)
 }
 
 func getRedisConfigurationInstance() (core.Storer, error) {
 	return redis.Factory(core.CacheProvider{Configuration: map[string]interface{}{
-		"Addrs": []string{"localhost:6379"},
+		"Addrs": []string{redisAddr},
 	}}, zap.NewNop().Sugar(), 0)
 }
 
@@ -189,6 +190,7 @@ func TestRedis_WalkMappings(t *testing.T) {
 	}
 
 	values := map[string]string{}
+
 	if err := walker.WalkMappings(prefix, func(key string, value []byte) bool {
 		values[key] = string(value)
 
@@ -208,6 +210,7 @@ func TestRedis_WalkMappings(t *testing.T) {
 	}
 
 	visited := 0
+
 	if err := walker.WalkMappings(prefix, func(key string, value []byte) bool {
 		visited++
 
@@ -227,8 +230,11 @@ func TestRedis_SetMultiLevel_MappingTTL(t *testing.T) {
 	client, _ := getRedisInstance()
 	client.DeleteMany(".*")
 
-	inspector := baseRedis.NewClient(&baseRedis.Options{Addr: "localhost:6379"})
-	defer inspector.Close()
+	inspector := baseRedis.NewClient(&baseRedis.Options{Addr: redisAddr})
+
+	defer func() {
+		_ = inspector.Close()
+	}()
 
 	ctx := context.Background()
 	mappingKey := core.MappingKeyPrefix + "base"

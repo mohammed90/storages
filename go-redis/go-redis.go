@@ -169,8 +169,8 @@ const mappingBatchSize = 100
 
 // WalkMappings streams the keys matching the prefix and their values in
 // bounded batches so the whole mapping index is never loaded in memory at
-// once. The walk stops early when fn returns false.
-func (provider *Redis) WalkMappings(prefix string, fn func(key string, value []byte) bool) error {
+// once. The walk stops early when walkFn returns false.
+func (provider *Redis) WalkMappings(prefix string, walkFn func(key string, value []byte) bool) error {
 	if provider.reconnecting {
 		provider.logger.Error("Impossible to walk the redis mappings while reconnecting.")
 
@@ -200,7 +200,7 @@ func (provider *Redis) WalkMappings(prefix string, fn func(key string, value []b
 			}
 
 			k, _ := strings.CutPrefix(item, prefix)
-			if !fn(k, []byte(value)) {
+			if !walkFn(k, []byte(value)) {
 				return false, nil
 			}
 		}
