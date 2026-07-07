@@ -167,3 +167,55 @@ func TestRedis_DeleteMany(t *testing.T) {
 		t.Errorf("The map should be empty, %d given", len(client.MapKeys("")))
 	}
 }
+
+func TestRedis_WalkMappings(t *testing.T) {
+	client, _ := getRedisInstance()
+	client.DeleteMany(".*")
+
+	walker, ok := client.(core.MappingWalker)
+	if !ok {
+		t.Fatal("The go-redis storer should implement core.MappingWalker")
+	}
+
+	prefix := "WALK_MAPPINGS_PREFIX_"
+	// Use more keys than one batch to cover the batch boundary.
+	count := 250
+
+	for i := range count {
+		_ = client.Set(fmt.Sprintf("%s%d", prefix, i), fmt.Appendf(nil, "Hello from %d", i), time.Minute)
+	}
+
+	values := map[string]string{}
+	if err := walker.WalkMappings(prefix, func(key string, value []byte) bool {
+		values[key] = string(value)
+
+		return true
+	}); err != nil {
+		t.Errorf("The walk shouldn't error, %v given", err)
+	}
+
+	if len(values) != count {
+		t.Errorf("The walk should visit %d entries, %d given", count, len(values))
+	}
+
+	for k, v := range values {
+		if v != "Hello from "+k {
+			t.Errorf("Expected Hello from %s, %s given", k, v)
+		}
+	}
+
+	visited := 0
+	if err := walker.WalkMappings(prefix, func(key string, value []byte) bool {
+		visited++
+
+		return false
+	}); err != nil {
+		t.Errorf("The walk shouldn't error, %v given", err)
+	}
+
+	if visited != 1 {
+		t.Errorf("The walk should stop after the first entry, %d visited", visited)
+	}
+
+	client.DeleteMany(".*")
+}

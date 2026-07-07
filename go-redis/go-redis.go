@@ -155,31 +155,79 @@ func (provider *Redis) ListKeys() []string {
 // MapKeys method returns the list of existing keys.
 func (provider *Redis) MapKeys(prefix string) map[string]string {
 	mapKeys := map[string]string{}
-	keys := []string{}
 
-	iter := provider.inClient.Scan(provider.ctx, 0, prefix+"*", 100).Iterator()
+	_ = provider.WalkMappings(prefix, func(key string, value []byte) bool {
+		mapKeys[key] = string(value)
+
+		return true
+	})
+
+	return mapKeys
+}
+
+const mappingBatchSize = 100
+
+// WalkMappings streams the keys matching the prefix and their values in
+// bounded batches so the whole mapping index is never loaded in memory at
+// once. The walk stops early when fn returns false.
+func (provider *Redis) WalkMappings(prefix string, fn func(key string, value []byte) bool) error {
+	if provider.reconnecting {
+		provider.logger.Error("Impossible to walk the redis mappings while reconnecting.")
+
+		return errors.New("reconnecting error")
+	}
+
+	batch := make([]string, 0, mappingBatchSize)
+
+	flush := func() (bool, error) {
+		if len(batch) == 0 {
+			return true, nil
+		}
+
+		vals, err := provider.inClient.MGet(provider.ctx, batch...).Result()
+		if err != nil {
+			return false, err
+		}
+
+		for idx, item := range batch {
+			if idx >= len(vals) || vals[idx] == nil {
+				continue
+			}
+
+			value, ok := vals[idx].(string)
+			if !ok {
+				continue
+			}
+
+			k, _ := strings.CutPrefix(item, prefix)
+			if !fn(k, []byte(value)) {
+				return false, nil
+			}
+		}
+
+		batch = batch[:0]
+
+		return true, nil
+	}
+
+	iter := provider.inClient.Scan(provider.ctx, 0, prefix+"*", mappingBatchSize).Iterator()
 	for iter.Next(provider.ctx) {
-		keys = append(keys, iter.Val())
-	}
+		batch = append(batch, iter.Val())
 
-	if err := iter.Err(); err != nil {
-		return mapKeys
-	}
-
-	vals, err := provider.inClient.MGet(provider.ctx, keys...).Result()
-	if err != nil {
-		return mapKeys
-	}
-
-	for idx, item := range keys {
-		k, _ := strings.CutPrefix(item, prefix)
-
-		if vals[idx] != nil {
-			mapKeys[k] = vals[idx].(string)
+		if len(batch) >= mappingBatchSize {
+			if cont, err := flush(); err != nil || !cont {
+				return err
+			}
 		}
 	}
 
-	return mapKeys
+	if err := iter.Err(); err != nil {
+		return err
+	}
+
+	_, err := flush()
+
+	return err
 }
 
 // GetMultiLevel tries to load the key and check if one of linked keys is a fresh/stale candidate.
