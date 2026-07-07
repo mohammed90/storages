@@ -249,6 +249,16 @@ func (provider *Redis) SetMultiLevel(baseKey, variedKey string, value []byte, va
 	compressed := new(bytes.Buffer)
 	writer := lz4.NewWriter(compressed)
 
+	// The lz4 default block size is 4 MB, which makes every compression and
+	// later decompression of the value churn 4 MB pooled blocks even for tiny
+	// payloads. Cached bodies are usually far smaller, so use the smallest
+	// block size. Readers pick the block size up from the frame header.
+	if err := writer.Apply(lz4.BlockSizeOption(lz4.Block64Kb)); err != nil {
+		provider.logger.Errorf("Impossible to configure the compressor for key %s into Redis, %v", variedKey, err)
+
+		return err
+	}
+
 	if _, err := writer.Write(value); err != nil {
 		_ = writer.Close()
 
@@ -281,7 +291,17 @@ func (provider *Redis) SetMultiLevel(baseKey, variedKey string, value []byte, va
 		return err
 	}
 
-	if err = provider.Set(mappingKey, val, -1); err != nil {
+	// Bound the mapping key lifetime instead of storing it forever: it only
+	// needs to outlive the longest-lived entry it references. Never shorten
+	// an expiration owned by a longer-lived entry; TTL returns a negative
+	// value for missing keys or keys without expiration, so legacy unbounded
+	// mapping keys become bounded on their next update.
+	mappingTTL := duration + provider.stale
+	if remaining := provider.inClient.TTL(provider.ctx, mappingKey).Val(); remaining > mappingTTL {
+		mappingTTL = remaining
+	}
+
+	if err = provider.inClient.Set(provider.ctx, mappingKey, val, mappingTTL).Err(); err != nil {
 		provider.logger.Errorf("Impossible to set value into Redis, %v", err)
 	}
 

@@ -1,12 +1,15 @@
 package redis_test
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/darkweak/storages/core"
 	redis "github.com/darkweak/storages/go-redis"
+	baseRedis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -215,6 +218,63 @@ func TestRedis_WalkMappings(t *testing.T) {
 
 	if visited != 1 {
 		t.Errorf("The walk should stop after the first entry, %d visited", visited)
+	}
+
+	client.DeleteMany(".*")
+}
+
+func TestRedis_SetMultiLevel_MappingTTL(t *testing.T) {
+	client, _ := getRedisInstance()
+	client.DeleteMany(".*")
+
+	inspector := baseRedis.NewClient(&baseRedis.Options{Addr: "localhost:6379"})
+	defer inspector.Close()
+
+	ctx := context.Background()
+	mappingKey := core.MappingKeyPrefix + "base"
+
+	if err := client.SetMultiLevel("base", "varied-short", []byte("value"), http.Header{}, "", 10*time.Second, "varied-short"); err != nil {
+		t.Errorf("Impossible to store the value, %v given", err)
+	}
+
+	ttl := inspector.TTL(ctx, mappingKey).Val()
+	if ttl <= 0 || ttl > 10*time.Second {
+		t.Errorf("The mapping key should expire within the entry lifetime, %v given", ttl)
+	}
+
+	if err := client.SetMultiLevel("base", "varied-long", []byte("value"), http.Header{}, "", time.Hour, "varied-long"); err != nil {
+		t.Errorf("Impossible to store the value, %v given", err)
+	}
+
+	ttl = inspector.TTL(ctx, mappingKey).Val()
+	if ttl <= 10*time.Second || ttl > time.Hour {
+		t.Errorf("The mapping key expiration should be extended by the longer-lived entry, %v given", ttl)
+	}
+
+	// A shorter-lived entry must not shorten the mapping key lifetime owned
+	// by the longer-lived one.
+	if err := client.SetMultiLevel("base", "varied-shorter", []byte("value"), http.Header{}, "", 5*time.Second, "varied-shorter"); err != nil {
+		t.Errorf("Impossible to store the value, %v given", err)
+	}
+
+	ttl = inspector.TTL(ctx, mappingKey).Val()
+	if ttl <= 10*time.Second || ttl > time.Hour {
+		t.Errorf("The mapping key expiration shouldn't be shortened, %v given", ttl)
+	}
+
+	// Legacy mapping keys stored without expiration must become bounded on
+	// their next update.
+	if err := inspector.Set(ctx, mappingKey, inspector.Get(ctx, mappingKey).Val(), 0).Err(); err != nil {
+		t.Errorf("Impossible to remove the mapping key expiration, %v given", err)
+	}
+
+	if err := client.SetMultiLevel("base", "varied-migrated", []byte("value"), http.Header{}, "", 30*time.Second, "varied-migrated"); err != nil {
+		t.Errorf("Impossible to store the value, %v given", err)
+	}
+
+	ttl = inspector.TTL(ctx, mappingKey).Val()
+	if ttl <= 0 || ttl > 30*time.Second {
+		t.Errorf("The unbounded mapping key should become bounded, %v given", ttl)
 	}
 
 	client.DeleteMany(".*")
